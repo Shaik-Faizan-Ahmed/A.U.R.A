@@ -97,6 +97,12 @@ numba==0.63.1
 llvmlite==0.46.0
 scikit-learn==1.8.0
 
+# uploads.py's /v1/uploads/document endpoint -- essay/report PDF & DOCX
+# text extraction. Both pure Python, no compiled extensions -- no
+# cp313-wheel risk like the packages above.
+pypdf==5.1.0
+python-docx==1.1.2
+
 # NOT a pip dependency, but required at runtime: models/video/audio_analyzer.py
 # and metadata_analyzer.py shell out to `ffmpeg`/`ffprobe` (audio extraction,
 # stream metadata) via subprocess -- install FFmpeg separately and ensure

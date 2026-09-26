@@ -42,6 +42,24 @@ class DecisionRequest(BaseModel):
     reviewer_id: str
 
 
+class SubmissionListItem(BaseModel):
+    """One row for the dashboard's full submission list (flagged + unflagged)."""
+    job_id: str
+    student_ref: str
+    modality: str
+    status: str  # queued | processing | complete
+    overall_score: Optional[float] = None
+    confidence: Optional[float] = None
+    fairness_banner: Optional[str] = None
+    demographic_group: Optional[str] = None
+    created_at: str
+    flag_id: Optional[str] = None
+    # Derived: pending_review (still analyzing) | approved (complete, not
+    # flagged, or flag dismissed) | flagged (flag pending review) |
+    # escalated (flag upheld)
+    review_status: Literal["pending_review", "approved", "flagged", "escalated"]
+
+
 class GroupStat(BaseModel):
     group: str
     fpr: float

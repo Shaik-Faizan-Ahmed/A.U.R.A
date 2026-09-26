@@ -78,6 +78,37 @@ _LAYER_IMPORTANCE = {
     "audio": 0.15,
 }
 
+# Fairness-audit quality group -- same mechanism and threshold as
+# image_detector.py's _quality_group(), just reading width/height straight
+# from layer1_metadata (populated by cv2.VideoCapture, always present
+# regardless of whether ffprobe succeeded -- see the metadata_forensics
+# 0.0-score investigation for why this can't depend on ffprobe). Reuses
+# the low_bandwidth_video/standard_video group names bias_audit.py already
+# seeds, now actually wired to real classification instead of only demo data.
+_LOW_RES_THRESHOLD_PX = 480
+
+
+def _quality_group(metadata_result: dict) -> str:
+    meta = (metadata_result or {}).get("metadata", {})
+    # metadata_analyzer.py (video) stores resolution as a single "WxH"
+    # string, not separate width/height keys -- unlike image_detector.py's
+    # PIL .size tuple. Parse it rather than assuming a shape that isn't
+    # actually there (would've silently always fallen through to
+    # "standard_video" otherwise).
+    resolution = meta.get("resolution", "")
+    try:
+        width_str, height_str = resolution.lower().split("x", 1)
+        width, height = int(width_str), int(height_str)
+    except (ValueError, AttributeError):
+        # cv2 reports 0x0 for an unopenable file, or resolution may be
+        # absent entirely (V.E.R.I.T.A.S's own 'error' path returns a
+        # bare {'score': 0.5, 'error': ...} with no 'metadata' key at
+        # all) -- either way, don't guess low-bandwidth.
+        return "standard_video"
+    if width == 0 or height == 0:
+        return "standard_video"
+    return "low_bandwidth_video" if min(width, height) < _LOW_RES_THRESHOLD_PX else "standard_video"
+
 
 def _combine_scores_aggressive(breakdown: dict, layer_confidence: dict) -> tuple[float, float]:
     """
@@ -147,7 +178,7 @@ def analyze_video(content_ref: str):
                 "confidence": 0.0,
                 "evidence_ref": None,
             })
-            return signals, {"fused_score": 0.5, "fused_confidence": 0.0}
+            return signals, {"fused_score": 0.5, "fused_confidence": 0.0, "quality_group": "standard_video"}
 
         breakdown = result.get("method_breakdown", {})
         num_frames = len(
@@ -196,10 +227,14 @@ def analyze_video(content_ref: str):
                 "confidence": 0.0,
                 "evidence_ref": None,
             })
-            return signals, {"fused_score": 0.5, "fused_confidence": 0.0}
+            return signals, {"fused_score": 0.5, "fused_confidence": 0.0, "quality_group": _quality_group(result.get("layer1_metadata"))}
 
         fused_score, fused_confidence = _combine_scores_aggressive(breakdown, per_layer_confidence)
-        return signals, {"fused_score": round(fused_score, 3), "fused_confidence": round(fused_confidence, 3)}
+        return signals, {
+            "fused_score": round(fused_score, 3),
+            "fused_confidence": round(fused_confidence, 3),
+            "quality_group": _quality_group(result.get("layer1_metadata")),
+        }
 
     finally:
         shutil.rmtree(frame_dir, ignore_errors=True)

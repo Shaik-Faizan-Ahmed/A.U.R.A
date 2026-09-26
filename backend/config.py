@@ -7,8 +7,25 @@ INSTITUTIONS = {
     "demo-key-college-b": "college_b",
 }
 
-# Overall score at/above which a submission is routed to the human review queue.
+# Overall score at/above which an IMAGE or VIDEO submission is routed to the
+# human review queue. Still the original guessed value -- no labeled
+# validation set exists yet for these two modalities (see
+# backend/data/validation/{image,video}/), so this hasn't been recalibrated
+# against real data the way TEXT_FLAG_THRESHOLD below has. Treat 0.6 here as
+# provisional, not evidence-backed.
 FLAG_THRESHOLD = float(os.getenv("FLAG_THRESHOLD", "0.6"))
+
+# Overall score at/above which a TEXT submission is flagged. Recalibrated
+# from 0.6 to 0.30 based on backend/data/validation/text/RESULTS.md: on 24
+# labeled English samples, every human sample scored <= 0.102 and every
+# AI-generated sample scored >= 0.454 (ROC-AUC = 1.000), so any threshold in
+# that gap gives perfect separation on this dataset. 0.30 sits with margin on
+# both sides. This does NOT apply to non-English text -- see jobs.py, which
+# routes non-English text submissions to human review unconditionally
+# instead of trusting this threshold, because the same validation found the
+# underlying signal unreliable (Spanish AUC ~0.56, French AUC 0.00 -- exactly
+# inverted) for languages other than English.
+TEXT_FLAG_THRESHOLD = float(os.getenv("TEXT_FLAG_THRESHOLD", "0.30"))
 
 # Disparate-impact ratio (worst-group FPR / best-group FPR) at/above which the
 # fairness banner is attached to a flagged submission.

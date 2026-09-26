@@ -522,8 +522,17 @@ def analyze_text(content_ref: str):
     meta = {
         "detected_language": result.detected_language,
         "calibration_applied": result.calibration_applied,
+        # Was a blanket "esl" for every non-English language, which collapsed
+        # Spanish/French/Arabic/etc. into one indistinguishable audit bucket
+        # before bias_audit.py ever saw the difference. Use the actual
+        # detected language code instead, so the fairness dashboard can show
+        # (and, per RESULTS.md, needs to show) that detection quality differs
+        # language by language rather than hiding them all behind one label.
+        # ESL_THRESHOLD_MULTIPLIER above still keys off the same per-language
+        # granularity, so this doesn't change the calibration behavior at all
+        # -- it only changes what jobs.py records this submission under.
         "suggested_demographic_group": (
-            "native_english" if result.detected_language == "en" else "esl"
+            "native_english" if result.detected_language == "en" else result.detected_language
         ),
     }
     return signals, meta

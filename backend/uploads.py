@@ -20,6 +20,7 @@ policy before accepting arbitrary uploads from a browser.
 """
 
 from __future__ import annotations
+import io
 import os
 import uuid
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
@@ -58,3 +59,70 @@ async def upload_file(
             out.write(chunk)
 
     return {"content_ref": dest_path, "filename": file.filename, "size": size}
+
+
+@router.post("/v1/uploads/document", tags=["submissions"])
+async def upload_document(
+    file: UploadFile = File(...),
+    institution_id: str = Depends(get_institution_id),
+):
+    """
+    Accepts an essay/report as PDF, DOCX, or TXT and returns its extracted
+    text as content_ref -- ready to pass straight into POST /v1/submissions
+    with modality="text". This is deliberately different from /v1/uploads
+    above: image/video analyzers read the file itself, so that endpoint
+    hands back a path, but text's content_ref (per schemas/api_models.py)
+    is the raw text itself, so this endpoint does the extraction instead
+    of a path handoff -- the caller never needs to know PDF/DOCX parsing
+    happened at all.
+
+    Legacy .doc (pre-2007 binary Word format) is NOT supported -- only
+    modern .docx. python-docx can only read .docx's XML-based format;
+    parsing old binary .doc would need a separate tool (antiword, or a
+    LibreOffice conversion step), which is out of scope for a demo.
+    A scanned/image-only PDF with no embedded text layer will also come
+    back empty -- that would need OCR, also out of scope here.
+    """
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+
+    if suffix not in (".pdf", ".docx", ".txt"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported document type '{suffix}'. Use .pdf, .docx, or "
+                ".txt -- legacy .doc and scanned/image-only PDFs aren't supported."
+            ),
+        )
+
+    raw = await file.read()
+    if len(raw) > config.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (50MB limit)")
+
+    if suffix == ".txt":
+        text = raw.decode("utf-8", errors="replace")
+    elif suffix == ".pdf":
+        text = _extract_pdf_text(raw)
+    else:  # .docx
+        text = _extract_docx_text(raw)
+
+    if not text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="No extractable text found in document (scanned/image-only PDF?)",
+        )
+
+    return {"content_ref": text, "filename": file.filename, "size": len(raw)}
+
+
+def _extract_pdf_text(raw: bytes) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(raw))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def _extract_docx_text(raw: bytes) -> str:
+    from docx import Document
+
+    doc = Document(io.BytesIO(raw))
+    return "\n".join(p.text for p in doc.paragraphs)

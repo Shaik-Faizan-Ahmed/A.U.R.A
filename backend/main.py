@@ -1,17 +1,16 @@
-import env_setup  # noqa: F401 -- must import first, before torch/transformers anywhere in the process, so HF_HOME/TORCH_HOME are set before those libraries read them (see env_setup.py)
-
 from typing import List
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
+import db
+import uploads
 from auth import get_institution_id
 from schemas.api_models import (
     SubmissionRequest, SubmissionCreatedResponse, SubmissionResultResponse,
-    FlagItem, DecisionRequest, FairnessResponse,
+    FlagItem, DecisionRequest, FairnessResponse, SubmissionListItem,
 )
 import jobs
-import uploads
 from services.bias_audit import get_fairness_stats
 
 app = FastAPI(
@@ -33,7 +32,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# uploads.py defines /v1/uploads and /v1/uploads/document as an APIRouter --
+# it was never registered here, which is why every browser-driven submission
+# (the frontend's /submit page) was 404ing before reaching jobs.py at all.
 app.include_router(uploads.router)
+
+
+@app.on_event("startup")
+async def on_startup():
+    # Creates backend/data/aura.db and its tables on first run; safe to call
+    # on every restart since seeding only happens when group_stats is empty.
+    db.init_db()
 
 
 @app.get("/")
@@ -60,6 +69,12 @@ async def create_submission(
         demographic_group=body.demographic_group,
     )
     return SubmissionCreatedResponse(job_id=job_id, status="queued")
+
+
+@app.get("/v1/submissions", response_model=List[SubmissionListItem], tags=["submissions"])
+async def get_all_submissions(institution_id: str = Depends(get_institution_id)):
+    """Full submission list (flagged + unflagged) for the dashboard, newest first."""
+    return jobs.list_submissions(institution_id)
 
 
 @app.get("/v1/submissions/{job_id}", response_model=SubmissionResultResponse, tags=["submissions"])
@@ -111,7 +126,4 @@ async def audit_fairness(institution_id: str = Depends(get_institution_id)):
 
 if __name__ == "__main__":
     import uvicorn
-    # Pass the app as an import string ("module:variable") rather than the
-    # object itself — required for reload=True to work, since the reloader
-    # needs to re-import the module in a subprocess on each file change.
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

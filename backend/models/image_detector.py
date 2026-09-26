@@ -30,6 +30,8 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
+from PIL import Image
+
 from models.ensemble_detector import predict_ensemble
 from models.frequency_analyzer import analyze_frequency_domain
 from models.face_analyzer import analyze_face
@@ -41,6 +43,29 @@ logger = logging.getLogger(__name__)
 # ENSEMBLE_WEIGHTS -- neural is meant to dominate the verdict, not be one
 # vote among four equal ones.
 _BASE_WEIGHTS = {"neural": 0.50, "frequency": 0.25, "face": 0.15, "metadata": 0.10}
+
+# Fairness-audit quality group, inferred from the image itself (never
+# self-reported -- see bias_audit.py's comments on why demographic_group
+# must come from content, not a form field). Mirrors video_detector.py's
+# low_bandwidth_video/standard_video split, same underlying mechanism:
+# metadata_forensics's ELA and block-compression-consistency checks (see
+# models/metadata_analyzer.py) are sensitive to low-resolution/heavily-
+# recompressed images regardless of whether the content is actually
+# AI-generated -- a student submitting a phone photo re-compressed through
+# a messaging app is more likely to trip those checks than one submitting
+# an original high-res file, which is a real proxy for device/connection
+# access, not detection accuracy. 480px on the shorter side is the same
+# threshold video_detector.py uses for its own low-resolution bucket.
+_LOW_RES_THRESHOLD_PX = 480
+
+
+def _quality_group(content_ref: str) -> str:
+    try:
+        with Image.open(content_ref) as img:
+            width, height = img.size
+        return "low_res_image" if min(width, height) < _LOW_RES_THRESHOLD_PX else "standard_image"
+    except Exception:
+        return "standard_image"  # unreadable dimensions -- don't guess low-res
 
 
 def _combine_scores_aggressive(
@@ -245,9 +270,13 @@ def analyze_image(content_ref: str):
             "confidence": 0.0,
             "evidence_ref": None,
         })
-        return signals, {"fused_score": 0.5, "fused_confidence": 0.0}
+        return signals, {"fused_score": 0.5, "fused_confidence": 0.0, "quality_group": _quality_group(content_ref)}
 
     fused_score, fused_confidence = _combine_scores_aggressive(
         ensemble_result, freq_result, face_result, meta_result
     )
-    return signals, {"fused_score": round(fused_score, 3), "fused_confidence": round(fused_confidence, 3)}
+    return signals, {
+        "fused_score": round(fused_score, 3),
+        "fused_confidence": round(fused_confidence, 3),
+        "quality_group": _quality_group(content_ref),
+    }

@@ -1,19 +1,19 @@
 import threading
-import time
 import uuid
-from typing import Dict, Any, Optional
+import json
+import logging
+from typing import Optional
 
 from models.progress_tracker import get_progress_tracker
 from models.text_detector import analyze_text
 from models.image_detector import analyze_image
 from models.video_detector import analyze_video
-from services.reasoning import build_reasoning, format_explanation
+from services.reasoning import build_reasoning
 from services.bias_audit import get_fairness_banner, record_outcome
 import config
+import db
 
-_jobs: Dict[str, Dict[str, Any]] = {}
-_flags: Dict[str, Dict[str, Any]] = {}
-_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def create_submission_job(
@@ -24,15 +24,18 @@ def create_submission_job(
     demographic_group: Optional[str] = None,
 ) -> str:
     job_id = str(uuid.uuid4())
-    with _lock:
-        _jobs[job_id] = {
-            "job_id": job_id,
-            "institution_id": institution_id,
-            "student_ref": student_ref,
-            "modality": modality,
-            "status": "queued",
-            "result": None,
-        }
+
+    conn = db.get_connection()
+    try:
+        with db.WRITE_LOCK:
+            conn.execute(
+                "INSERT INTO submissions (job_id, institution_id, student_ref, modality, "
+                "content_ref, demographic_group, status) VALUES (?, ?, ?, ?, ?, ?, 'queued')",
+                (job_id, institution_id, student_ref, modality, content_ref, demographic_group),
+            )
+            conn.commit()
+    finally:
+        conn.close()
 
     thread = threading.Thread(
         target=_run_analysis,
@@ -43,145 +46,255 @@ def create_submission_job(
     return job_id
 
 
+def _run_real_analysis(modality: str, content_ref: str):
+    """Dispatches to the real per-modality detector. Each of these already
+    returns (signals, meta) in AURA's common Signal shape -- see the module
+    docstrings in models/text_detector.py, models/image_detector.py, and
+    models/video_detector.py."""
+    if modality == "text":
+        return analyze_text(content_ref)
+    elif modality == "image":
+        return analyze_image(content_ref)
+    elif modality == "video":
+        return analyze_video(content_ref)
+    else:
+        raise ValueError(f"Unknown modality: {modality!r}")
+
+
+def _suggested_group(modality: str, meta: dict) -> Optional[str]:
+    """Falls back to the detector's own proxy-group signal when the caller
+    didn't supply demographic_group explicitly. text_detector.py's
+    analyze_text() docstring was written for exactly this handoff
+    ("suggested_demographic_group ... so callers (jobs.py) can default the
+    bias-audit demographic_group ... instead of falling back to
+    'unspecified'") but nothing here ever actually read it -- every real
+    submission was landing in 'unspecified' regardless of what the detector
+    figured out. Image/video use their own quality_group the same way."""
+    if modality == "text":
+        return meta.get("suggested_demographic_group")
+    return meta.get("quality_group")
+
+
 def _run_analysis(job_id, institution_id, student_ref, modality, content_ref, demographic_group):
     tracker = get_progress_tracker()
-    with _lock:
-        _jobs[job_id]["status"] = "processing"
+    _update_status(job_id, "processing")
     tracker.update(f"Job {job_id}: starting {modality} analysis")
 
-    # --- Phase 1 -----------------------------------------------------
-    # Text modality runs the real detector (models/text_detector.py) and
-    # goes through reasoning.py's generic confidence-weighted average --
-    # appropriate there since no text signal is meant to dominate another
-    # by design (see reasoning.py's compute_overall docstring). Image and
-    # video (models/image_detector.py, models/video_detector.py) instead
-    # compute their own importance-weighted fused (score, confidence) --
-    # ported from V.E.R.I.T.A.S's own fusion, where e.g. frame-based
-    # analysis is meant to dominate a video verdict (40%) and metadata
-    # barely votes (10%) -- and jobs.py uses that fused pair directly as
-    # overall_score/confidence instead of averaging the signals again.
-    # format_explanation() still builds the same evidence-referencing text
-    # either way, just handed a different (score, confidence) to describe.
+    try:
+        signals, meta = _run_real_analysis(modality, content_ref)
+    except Exception as e:
+        # Mirrors the neutral-signal fallback each detector already uses
+        # internally for its own partial failures (e.g. image_detector.py
+        # when all four analyzers fail) -- a hard failure here (bad file
+        # path, model load error) shouldn't crash the job, just produce a
+        # zero-confidence result a human reviewer will see plainly isn't a
+        # real verdict.
+        logger.exception(f"Job {job_id}: {modality} analysis raised, using neutral fallback")
+        signals = [{
+            "modality": modality, "signal_name": "analysis_error",
+            "raw_score": 0.5, "confidence": 0.0, "evidence_ref": None,
+        }]
+        meta = {}
+
+    if not demographic_group:
+        demographic_group = _suggested_group(modality, meta) or "unspecified"
+
+    overall_score, confidence, explanation = build_reasoning(signals)
+
+    # --- Per-modality flag decision --------------------------------------
+    # Image/video: no labeled validation set exists yet for either modality
+    # (see backend/data/validation/{image,video}/), so they still use the
+    # original, unvalidated config.FLAG_THRESHOLD.
+    #
+    # Text: config.TEXT_FLAG_THRESHOLD was recalibrated against real labeled
+    # data (see config.py's comment + backend/data/validation/text/RESULTS.md)
+    # but that validation also found the underlying signal unreliable for
+    # anything other than English (Spanish AUC ~0.56, French AUC 0.00 --
+    # exactly inverted). Rather than let a score we know is unreliable or
+    # backwards silently decide "not AI", non-English text is always routed
+    # to human review instead of trusting the threshold.
     if modality == "text":
-        signals, text_meta = analyze_text(content_ref)
-        # If the caller didn't pass demographic_group, fall back to the
-        # detector's own detected-language signal instead of "unspecified"
-        # -- ties the bias-audit layer to a real signal the API already
-        # computed, rather than requiring the caller to self-report it.
-        if demographic_group is None:
-            demographic_group = text_meta["suggested_demographic_group"]
-        overall_score, confidence, explanation = build_reasoning(signals)
-    elif modality == "image":
-        signals, fused_meta = analyze_image(content_ref)
-        overall_score = fused_meta["fused_score"]
-        confidence = fused_meta["fused_confidence"]
-        explanation = format_explanation(signals, overall_score, confidence)
-    elif modality == "video":
-        signals, fused_meta = analyze_video(content_ref)
-        overall_score = fused_meta["fused_score"]
-        confidence = fused_meta["fused_confidence"]
-        explanation = format_explanation(signals, overall_score, confidence)
+        detected_lang = meta.get("detected_language", "en")
+        if detected_lang != "en":
+            should_flag = True
+            explanation = (
+                f"Automated AI-detection accuracy has not been validated for text "
+                f"in this language ('{detected_lang}') and was found unreliable in "
+                f"internal testing (see backend/data/validation/text/RESULTS.md). "
+                f"Routed to human review rather than trusting an automated score.\n\n"
+            ) + explanation
+        else:
+            should_flag = overall_score >= config.TEXT_FLAG_THRESHOLD
     else:
-        time.sleep(2)
-        signals = _fixture_signals(modality, content_ref)
-        overall_score, confidence, explanation = build_reasoning(signals)
-    # -------------------------------------------------------------------
+        should_flag = overall_score >= config.FLAG_THRESHOLD
 
     fairness_banner = get_fairness_banner(institution_id, demographic_group)
 
-    result = {
-        "modality": modality,
-        "overall_score": overall_score,
-        "confidence": confidence,
-        "explanation": explanation,
-        "signals": signals,
-        "fairness_banner": fairness_banner,
-    }
+    conn = db.get_connection()
+    try:
+        with db.WRITE_LOCK:
+            conn.execute(
+                "UPDATE submissions SET status='complete', overall_score=?, confidence=?, "
+                "explanation=?, signals_json=?, fairness_banner=?, demographic_group=? WHERE job_id=?",
+                (overall_score, confidence, explanation, json.dumps(signals), fairness_banner,
+                 demographic_group, job_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
 
-    with _lock:
-        _jobs[job_id]["status"] = "complete"
-        _jobs[job_id]["result"] = result
+    # Updates the persistent per-group flag-rate stats used by the fairness
+    # endpoint. Passes the actual should_flag decision above, not a
+    # recomputed one, so the audit stats can never disagree with the real
+    # flag/no-flag outcome (see bias_audit.py's record_outcome docstring).
+    record_outcome(institution_id, demographic_group, should_flag)
 
-    record_outcome(institution_id, demographic_group, overall_score)
-
-    if overall_score >= config.FLAG_THRESHOLD:
+    if should_flag:
         flag_id = str(uuid.uuid4())
-        with _lock:
-            _flags[flag_id] = {
-                "flag_id": flag_id,
-                "job_id": job_id,
-                "institution_id": institution_id,
-                "student_ref": student_ref,
-                "modality": modality,
-                "overall_score": overall_score,
-                "explanation": explanation,
-                "fairness_banner": fairness_banner,
-                "status": "pending",
-            }
+        conn = db.get_connection()
+        try:
+            with db.WRITE_LOCK:
+                conn.execute(
+                    "INSERT INTO flags (flag_id, job_id, institution_id, student_ref, modality, "
+                    "overall_score, explanation, fairness_banner, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                    (flag_id, job_id, institution_id, student_ref, modality,
+                     overall_score, explanation, fairness_banner),
+                )
+                conn.commit()
+        finally:
+            conn.close()
 
     tracker.update(f"Job {job_id}: complete, score={overall_score:.2f}")
 
 
-def _fixture_signals(modality: str, content_ref: str):
-    """Deterministic-ish fixture data so demo runs are repeatable pre-Phase-1."""
-    base = min(0.9, 0.3 + (len(content_ref or "") % 50) / 100)
-
-    if modality == "text":
-        return [
-            {
-                "modality": "text", "signal_name": "perplexity",
-                "raw_score": round(base, 2), "confidence": 0.8,
-                "evidence_ref": {"start": 0, "end": min(40, len(content_ref or ""))},
-            },
-            {
-                "modality": "text", "signal_name": "burstiness",
-                "raw_score": round(base * 0.9, 2), "confidence": 0.7,
-                "evidence_ref": None,
-            },
-        ]
-    elif modality == "image":
-        return [
-            {
-                "modality": "image", "signal_name": "neural_ensemble",
-                "raw_score": round(base, 2), "confidence": 0.85,
-                "evidence_ref": {"bbox": [10, 10, 100, 100]},
-            },
-        ]
-    else:  # video
-        return [
-            {
-                "modality": "video", "signal_name": "frame_based",
-                "raw_score": round(base, 2), "confidence": 0.8,
-                "evidence_ref": {"frame_range": [0, 30]},
-            },
-            {
-                "modality": "video", "signal_name": "temporal_consistency",
-                "raw_score": round(base * 0.8, 2), "confidence": 0.75,
-                "evidence_ref": {"timestamp": 4.2},
-            },
-        ]
+def _update_status(job_id: str, status: str):
+    conn = db.get_connection()
+    try:
+        with db.WRITE_LOCK:
+            conn.execute("UPDATE submissions SET status=? WHERE job_id=?", (status, job_id))
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def get_job(job_id: str):
-    with _lock:
-        return _jobs.get(job_id)
+    """Returns {job_id, institution_id, status, result} -- same shape main.py
+    expected from the old in-memory dict, now backed by SQLite."""
+    conn = db.get_connection()
+    try:
+        row = conn.execute("SELECT * FROM submissions WHERE job_id=?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+
+    row = dict(row)
+    result = None
+    if row["status"] == "complete":
+        result = {
+            "modality": row["modality"],
+            "overall_score": row["overall_score"],
+            "confidence": row["confidence"],
+            "explanation": row["explanation"],
+            "signals": json.loads(row["signals_json"]) if row["signals_json"] else [],
+            "fairness_banner": row["fairness_banner"],
+        }
+
+    return {
+        "job_id": row["job_id"],
+        "institution_id": row["institution_id"],
+        "status": row["status"],
+        "result": result,
+    }
+
+
+def list_submissions(institution_id: str):
+    """
+    Full submission list (flagged + unflagged) for the dashboard, joined
+    against flags so each row carries a derived review_status:
+      pending_review -- still queued/processing
+      approved       -- complete, never flagged, OR flag was dismissed
+      flagged        -- flag exists and is still pending
+      escalated      -- flag exists and reviewer upheld it
+    """
+    conn = db.get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.*, f.flag_id AS flag_id, f.status AS flag_status
+            FROM submissions s
+            LEFT JOIN flags f ON f.job_id = s.job_id
+            WHERE s.institution_id = ?
+            ORDER BY s.created_at DESC
+            """,
+            (institution_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items = []
+    for r in rows:
+        r = dict(r)
+        if r["status"] != "complete":
+            review_status = "pending_review"
+        elif r["flag_id"] is None:
+            review_status = "approved"
+        elif r["flag_status"] == "pending":
+            review_status = "flagged"
+        elif r["flag_status"] == "upheld":
+            review_status = "escalated"
+        else:  # dismissed
+            review_status = "approved"
+
+        items.append({
+            "job_id": r["job_id"],
+            "student_ref": r["student_ref"],
+            "modality": r["modality"],
+            "status": r["status"],
+            "overall_score": r["overall_score"],
+            "confidence": r["confidence"],
+            "fairness_banner": r["fairness_banner"],
+            "demographic_group": r["demographic_group"],
+            "created_at": r["created_at"],
+            "flag_id": r["flag_id"],
+            "review_status": review_status,
+        })
+    return items
 
 
 def list_flags(institution_id: str):
-    with _lock:
-        return [f for f in _flags.values() if f["institution_id"] == institution_id]
+    conn = db.get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM flags WHERE institution_id=? ORDER BY created_at DESC",
+            (institution_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_flag(flag_id: str):
-    with _lock:
-        return _flags.get(flag_id)
+    conn = db.get_connection()
+    try:
+        row = conn.execute("SELECT * FROM flags WHERE flag_id=?", (flag_id,)).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
 
 
 def set_flag_decision(flag_id: str, decision: str, reviewer_id: str):
-    with _lock:
-        flag = _flags.get(flag_id)
-        if flag is None:
-            return None
-        flag["status"] = "upheld" if decision == "uphold" else "dismissed"
-        flag["reviewer_id"] = reviewer_id
-        return flag
+    status = "upheld" if decision == "uphold" else "dismissed"
+    conn = db.get_connection()
+    try:
+        with db.WRITE_LOCK:
+            conn.execute(
+                "UPDATE flags SET status=?, reviewer_id=?, decided_at=datetime('now') WHERE flag_id=?",
+                (status, reviewer_id, flag_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return get_flag(flag_id)

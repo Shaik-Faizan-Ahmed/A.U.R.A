@@ -3,6 +3,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import config
 from main import app
 
 VALID_KEY = "demo-key-college-a"
@@ -98,7 +99,9 @@ def test_ai_sounding_text_submission_flags_for_review():
     flags_response = client.get("/v1/flags", headers=HEADERS)
     assert flags_response.status_code == 200
     flagged_job_ids = [f["job_id"] for f in flags_response.json()]
-    if result["overall_score"] >= 0.6:
+    # Text now uses config.TEXT_FLAG_THRESHOLD (recalibrated to 0.30 against
+    # real validation data), not the old hardcoded 0.6 -- see config.py.
+    if result["overall_score"] >= config.TEXT_FLAG_THRESHOLD:
         assert job_id in flagged_job_ids
 
 
