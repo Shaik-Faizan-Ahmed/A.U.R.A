@@ -26,16 +26,28 @@ htmlcov/
 backend/models_cache/
 models_cache/
 
-# --- Node / frontend (Vite/React) ---
+# User-uploaded image/video files (POST /v1/uploads) -- local demo storage,
+# not meant to be committed
+backend/uploads/
+
+# --- Node / frontend (Next.js/React) ---
 node_modules/
-frontend/dist/
-.vite/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+*.tsbuildinfo
 *.local
 
 # --- Env / secrets ---
 .env
 .env.*
 !.env.example
+
+# Reference-only clone (AEGIS Academic Integrity Checker) -- credited in
+# models/text_detector.py's docstring as where the perplexity/burstiness/
+# stylometry technique was ported from, but nothing here imports it at
+# runtime. Kept locally for reference, not part of the AURA codebase.
+aegis-integrity-main/
 
 # --- OS / editor ---
 .DS_Store
