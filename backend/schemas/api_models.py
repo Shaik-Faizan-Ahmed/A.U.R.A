@@ -24,6 +24,14 @@ class SubmissionResultResponse(BaseModel):
     explanation: Optional[str] = None
     signals: Optional[List[Signal]] = None
     fairness_banner: Optional[str] = None
+    # The proxy group this submission was actually bucketed into for the
+    # bias audit (text: language code; image/video: quality_group from
+    # models/image_detector.py / video_detector.py). Was computed and
+    # persisted (submissions.demographic_group) but never returned here --
+    # /v1/audit/fairness and /v1/submissions (the list endpoint) could show
+    # it in aggregate, but the single-submission result view (what /submit
+    # actually renders right after analysis) had no way to display it.
+    demographic_group: Optional[str] = None
 
 
 class FlagItem(BaseModel):

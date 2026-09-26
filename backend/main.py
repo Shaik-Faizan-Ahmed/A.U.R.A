@@ -94,6 +94,7 @@ async def get_submission(job_id: str, institution_id: str = Depends(get_institut
         explanation=result.get("explanation"),
         signals=result.get("signals"),
         fairness_banner=result.get("fairness_banner"),
+        demographic_group=result.get("demographic_group"),
     )
 
 

@@ -53,22 +53,105 @@ def _migrate(conn: sqlite3.Connection):
     Adds any columns the current schema expects that an older version of
     this DB file doesn't have yet. CREATE TABLE IF NOT EXISTS only helps on
     a brand-new file -- it does nothing to a table that already exists with
-    an older shape, which is what caused 'no such column: created_at' when
-    the DB predated that column being added to the schema below.
+    an older shape. This DB has hit that twice now (first 'created_at', then
+    'content_ref' -- see git history/chat log) with one-off column checks
+    added reactively each time something crashed on a missing column. Made
+    this data-driven instead so the next schema addition doesn't require
+    yet another hand-written ALTER TABLE spliced in here.
     """
-    submissions_cols = _existing_columns(conn, "submissions")
-    if "created_at" not in submissions_cols:
-        conn.execute("ALTER TABLE submissions ADD COLUMN created_at TEXT")
-        conn.execute("UPDATE submissions SET created_at = datetime('now') WHERE created_at IS NULL")
+    expected = {
+        "submissions": {
+            "content_ref": "TEXT",
+            "demographic_group": "TEXT",
+            "status": "TEXT NOT NULL DEFAULT 'queued'",
+            "overall_score": "REAL",
+            "confidence": "REAL",
+            "explanation": "TEXT",
+            "signals_json": "TEXT",
+            "fairness_banner": "TEXT",
+            "created_at": "TEXT",
+        },
+        "flags": {
+            "fairness_banner": "TEXT",
+            "reviewer_id": "TEXT",
+            "created_at": "TEXT",
+            "decided_at": "TEXT",
+        },
+    }
 
-    flags_cols = _existing_columns(conn, "flags")
-    if "created_at" not in flags_cols:
-        conn.execute("ALTER TABLE flags ADD COLUMN created_at TEXT")
-        conn.execute("UPDATE flags SET created_at = datetime('now') WHERE created_at IS NULL")
-    if "decided_at" not in flags_cols:
-        conn.execute("ALTER TABLE flags ADD COLUMN decided_at TEXT")
-    if "reviewer_id" not in flags_cols:
-        conn.execute("ALTER TABLE flags ADD COLUMN reviewer_id TEXT")
+    for table, columns in expected.items():
+        existing_cols = _existing_columns(conn, table)
+        for col, col_type in columns.items():
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                print(f"[db] added missing column {table}.{col}")
+
+    # created_at backfill: a column added via ALTER TABLE can't carry a
+    # datetime('now') DEFAULT for pre-existing rows (SQLite only applies
+    # the default going forward), so existing rows need it set explicitly.
+    for table in ("submissions", "flags"):
+        conn.execute(f"UPDATE {table} SET created_at = datetime('now') WHERE created_at IS NULL")
+
+    conn.commit()
+
+
+def _migrate_stale_group_seed(conn: sqlite3.Connection):
+    """
+    Fixes group_stats rows left over from an older version of
+    _SEED_GROUP_STATS, for a DB file that was already seeded (non-empty
+    group_stats) before this dict had per-language text buckets or any
+    image buckets at all -- init_db()'s seeding block only ever runs once,
+    on an empty table, so a DB seeded under the old shape never got these
+    additions and just sat there showing a blanket 'esl' bucket and no
+    Image section, no matter how many times the app restarted.
+
+    Two separate fixes, both idempotent (safe to run on every startup):
+      1. Any institution with zero rows ending in '_image' is missing the
+         image seed entirely -- insert it from _SEED_GROUP_STATS.
+      2. A literal 'esl' group_name is unsplittable leftover data (no
+         current code path can produce that string -- text_detector.py's
+         suggested_demographic_group is always either 'native_english' or
+         a real language code) -- delete it, and backfill the per-language
+         seed rows (es/fr) if they aren't already present, so the language
+         breakdown appears immediately instead of just disappearing.
+
+    Never touches a group_name this dict doesn't know about, and never
+    touches native_english/low_bandwidth_video/standard_video or any real
+    per-language row that already exists -- only adds what's missing and
+    removes the one string that's now provably dead.
+    """
+    for institution_id, groups in _SEED_GROUP_STATS.items():
+        existing = {
+            row["group_name"]
+            for row in conn.execute(
+                "SELECT group_name FROM group_stats WHERE institution_id=?", (institution_id,)
+            ).fetchall()
+        }
+
+        if not any(g.endswith("_image") for g in existing):
+            for group_name in ("low_res_image", "standard_image"):
+                flagged, total = groups[group_name]
+                conn.execute(
+                    "INSERT OR IGNORE INTO group_stats (institution_id, group_name, flagged_count, total_count) "
+                    "VALUES (?, ?, ?, ?)",
+                    (institution_id, group_name, flagged, total),
+                )
+            print(f"[db] backfilled missing image seed groups for {institution_id}")
+
+        if "esl" in existing:
+            conn.execute(
+                "DELETE FROM group_stats WHERE institution_id=? AND group_name='esl'",
+                (institution_id,),
+            )
+            for group_name in ("es", "fr"):
+                if group_name not in existing:
+                    flagged, total = groups[group_name]
+                    conn.execute(
+                        "INSERT OR IGNORE INTO group_stats (institution_id, group_name, flagged_count, total_count) "
+                        "VALUES (?, ?, ?, ?)",
+                        (institution_id, group_name, flagged, total),
+                    )
+            print(f"[db] replaced stale 'esl' bucket with per-language seed rows for {institution_id}")
 
     conn.commit()
 
@@ -141,5 +224,9 @@ def init_db():
                             (institution_id, group_name, flagged, total),
                         )
                 conn.commit()
+            else:
+                # Table already had rows (an older seed) -- run the targeted
+                # backfill/cleanup above instead of the fresh-seed path.
+                _migrate_stale_group_seed(conn)
         finally:
             conn.close()

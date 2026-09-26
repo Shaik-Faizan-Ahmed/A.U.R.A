@@ -30,7 +30,8 @@ def create_submission_job(
         with db.WRITE_LOCK:
             conn.execute(
                 "INSERT INTO submissions (job_id, institution_id, student_ref, modality, "
-                "content_ref, demographic_group, status) VALUES (?, ?, ?, ?, ?, ?, 'queued')",
+                "content_ref, demographic_group, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'queued', datetime('now'))",
                 (job_id, institution_id, student_ref, modality, content_ref, demographic_group),
             )
             conn.commit()
@@ -156,8 +157,8 @@ def _run_analysis(job_id, institution_id, student_ref, modality, content_ref, de
             with db.WRITE_LOCK:
                 conn.execute(
                     "INSERT INTO flags (flag_id, job_id, institution_id, student_ref, modality, "
-                    "overall_score, explanation, fairness_banner, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                    "overall_score, explanation, fairness_banner, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))",
                     (flag_id, job_id, institution_id, student_ref, modality,
                      overall_score, explanation, fairness_banner),
                 )
@@ -200,6 +201,7 @@ def get_job(job_id: str):
             "explanation": row["explanation"],
             "signals": json.loads(row["signals_json"]) if row["signals_json"] else [],
             "fairness_banner": row["fairness_banner"],
+            "demographic_group": row["demographic_group"],
         }
 
     return {

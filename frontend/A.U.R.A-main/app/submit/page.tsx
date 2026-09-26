@@ -30,7 +30,25 @@ interface SubmissionResult {
   explanation?: string
   signals?: SubmissionSignal[]
   fairnessBanner?: string | null
+  demographicGroup?: string | null
   errorMessage?: string
+}
+
+// Same group-name conventions the /upload (Audit Data) dashboard's
+// classifyGroup() uses -- kept as its own small copy here rather than a
+// shared import since this codebase doesn't have a shared lib/api.ts
+// anymore (each page owns its own fetch calls and display logic).
+const GROUP_LABELS: Record<string, string> = {
+  native_english: 'Native English', esl: 'ESL / Non-native English', unspecified: 'Unspecified',
+  en: 'English', es: 'Spanish', fr: 'French', de: 'German', zh: 'Chinese',
+  ar: 'Arabic', pt: 'Portuguese', it: 'Italian', ru: 'Russian', uk: 'Ukrainian',
+  ko: 'Korean', ja: 'Japanese', fa: 'Farsi',
+  low_res_image: 'Low-resolution image', standard_image: 'Standard-resolution image',
+  low_bandwidth_video: 'Low-bandwidth video', standard_video: 'Standard-bandwidth video',
+}
+function groupLabel(group?: string | null): string | null {
+  if (!group) return null
+  return GROUP_LABELS[group] ?? group.replace(/_/g, ' ')
 }
 
 // Demo-only: AURA has no login flow yet, so the caller's institution is
@@ -126,6 +144,7 @@ async function uploadAndAnalyze(file: File, modality: 'image' | 'video', student
         explanation: data.explanation,
         signals: data.signals,
         fairnessBanner: data.fairness_banner,
+        demographicGroup: data.demographic_group,
       }
     }
     await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
@@ -188,6 +207,7 @@ async function extractAndAnalyzeEssay(file: File, studentRef: string): Promise<S
         explanation: data.explanation,
         signals: data.signals,
         fairnessBanner: data.fairness_banner,
+        demographicGroup: data.demographic_group,
       }
     }
     await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
@@ -288,6 +308,9 @@ export default function SubmitPage() {
                   <div>
                     <p className="text-sm font-medium text-white">{r.fileName}</p>
                     <p className="text-xs text-slate-500 uppercase tracking-[2px]">{r.category}</p>
+                    {groupLabel(r.demographicGroup) && (
+                      <p className="text-xs text-slate-600 mt-0.5">Audit cohort: {groupLabel(r.demographicGroup)}</p>
+                    )}
                   </div>
                   {r.status === 'error' ? (
                     <span className="text-sm px-3 py-1 rounded-full bg-red-500/20 text-red-400 flex items-center gap-1">
