@@ -51,4 +51,65 @@ piexif==1.1.3
 # automatically. So face_forensics signals still get produced, just via
 # the lower-accuracy OpenCV path instead of MediaPipe's landmark model --
 # not a difference our test suite (mocked) or jobs.py needs to know about.
-# Revisit if/when mediapipe ships a cp313 wheel.
+# Revisit if/when mediapipe ships a cp313 wheel. The same fallback applies
+# inside models/video/temporal_analyzer.py and physiological_analyzer.py
+# (landmark jitter / blink detection both degrade to OpenCV-based methods
+# without mediapipe) -- quick_detector.py doesn't call physiological
+# analysis at all, so that one's moot for the video adapter regardless.
+
+# video_detector.py (Phase 1b) -- deps for quick_detector.py's layers,
+# copied from V.E.R.I.T.A.S along with the rest of models/video/. The
+# neural-ensemble/face/frequency layers reuse image_detector.py's deps
+# above (transformers, torch, opencv, numpy, scipy); everything below is
+# new for the video-specific layers.
+#
+# Same Python-3.13-on-Windows wheel-availability problem as above drove a
+# few re-pins from what V.E.R.I.T.A.S itself uses:
+#   - scenedetect 0.6.7.1 (frame_extractor.py's scene-boundary detection)
+#     is pure Python, kept as-is.
+#   - facenet-pytorch intentionally NOT pinned/installed: it hard-pins
+#     numpy<2.0.0 (facenet-pytorch==2.6.0 depends on numpy>=1.24.0,<2.0.0),
+#     which directly conflicts with numpy==2.1.3 above -- and downgrading
+#     numpy isn't an option, since that's exactly what got numpy bumped to
+#     2.1.3 in the first place (no cp313 Windows wheel below 2.0). Same
+#     non-gap as mediapipe's absence above: temporal_analyzer.py's
+#     check_identity_persistence() wraps its `from facenet_pytorch import
+#     ...` in a broad try/except that already catches ImportError and
+#     falls back to check_identity_persistence_fallback() (histogram
+#     correlation between consecutive frames, no ML model needed) -- so
+#     the temporal_consistency signal still gets produced, just via the
+#     lower-accuracy fallback instead of face-embedding similarity.
+#     Revisit if facenet-pytorch ever relaxes its numpy<2.0.0 pin.
+#   - librosa 0.11.0 kept as-is; its own heavy numba/llvmlite
+#     dependency IS re-pinned below for cp313 wheel availability.
+#   - numba/llvmlite: V.E.R.I.T.A.S pins numba==0.63.1/llvmlite==0.46.0,
+#     which are recent enough to already ship cp313 Windows wheels, so no
+#     change needed there -- listed explicitly anyway since they're
+#     otherwise-implicit transitive deps of librosa and worth pinning.
+#   - scikit-learn kept unpinned-version-wise at whatever transitively
+#     resolves; V.E.R.I.T.A.S's 1.8.0 already ships cp313 wheels.
+scenedetect==0.6.7.1
+librosa==0.11.0
+soundfile==0.13.1
+audioread==3.1.0
+soxr==1.0.0
+numba==0.63.1
+llvmlite==0.46.0
+scikit-learn==1.8.0
+
+# NOT a pip dependency, but required at runtime: models/video/audio_analyzer.py
+# and metadata_analyzer.py shell out to `ffmpeg`/`ffprobe` (audio extraction,
+# stream metadata) via subprocess -- install FFmpeg separately and ensure
+# it's on PATH, or set the FFMPEG_PATH env var. Without it, audio_analyzer.py
+# degrades gracefully (has_audio=True, score=0.0, a message noting FFmpeg is
+# missing) rather than failing the whole video job -- quick_detector.py's
+# has_audio branch already guards this.
+#
+# Also NOT a pip dependency: models/video/video_3d_model.py's VideoMAE path
+# (MCG-NJU/videomae-base) IS exercised by quick_detector.py -- it pulls
+# model weights from HuggingFace Hub at runtime on first use, needing live
+# network access, same as image_detector.py's HuggingFace models already
+# require. physics_checker.py's MiDaS path (torch.hub, GitHub) is only
+# called from comprehensive_detector.py, which video_detector.py doesn't
+# use -- so that one's present in the copied files but not actually
+# exercised today.

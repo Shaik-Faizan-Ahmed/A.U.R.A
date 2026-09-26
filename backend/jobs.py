@@ -6,7 +6,8 @@ from typing import Dict, Any, Optional
 from models.progress_tracker import get_progress_tracker
 from models.text_detector import analyze_text
 from models.image_detector import analyze_image
-from services.reasoning import build_reasoning
+from models.video_detector import analyze_video
+from services.reasoning import build_reasoning, format_explanation
 from services.bias_audit import get_fairness_banner, record_outcome
 import config
 
@@ -49,12 +50,18 @@ def _run_analysis(job_id, institution_id, student_ref, modality, content_ref, de
     tracker.update(f"Job {job_id}: starting {modality} analysis")
 
     # --- Phase 1 -----------------------------------------------------
-    # Text modality runs the real detector (models/text_detector.py).
-    # Image modality now runs the real V.E.R.I.T.A.S-adapted detector
-    # (models/image_detector.py, Phase 1b). Video still uses fixture
-    # signals until its adapter wrapping is built. Nothing downstream
-    # (reasoning, bias audit, flags) needs to change either way -- every
-    # path emits the same Signal schema.
+    # Text modality runs the real detector (models/text_detector.py) and
+    # goes through reasoning.py's generic confidence-weighted average --
+    # appropriate there since no text signal is meant to dominate another
+    # by design (see reasoning.py's compute_overall docstring). Image and
+    # video (models/image_detector.py, models/video_detector.py) instead
+    # compute their own importance-weighted fused (score, confidence) --
+    # ported from V.E.R.I.T.A.S's own fusion, where e.g. frame-based
+    # analysis is meant to dominate a video verdict (40%) and metadata
+    # barely votes (10%) -- and jobs.py uses that fused pair directly as
+    # overall_score/confidence instead of averaging the signals again.
+    # format_explanation() still builds the same evidence-referencing text
+    # either way, just handed a different (score, confidence) to describe.
     if modality == "text":
         signals, text_meta = analyze_text(content_ref)
         # If the caller didn't pass demographic_group, fall back to the
@@ -63,14 +70,23 @@ def _run_analysis(job_id, institution_id, student_ref, modality, content_ref, de
         # computed, rather than requiring the caller to self-report it.
         if demographic_group is None:
             demographic_group = text_meta["suggested_demographic_group"]
+        overall_score, confidence, explanation = build_reasoning(signals)
     elif modality == "image":
-        signals = analyze_image(content_ref)
+        signals, fused_meta = analyze_image(content_ref)
+        overall_score = fused_meta["fused_score"]
+        confidence = fused_meta["fused_confidence"]
+        explanation = format_explanation(signals, overall_score, confidence)
+    elif modality == "video":
+        signals, fused_meta = analyze_video(content_ref)
+        overall_score = fused_meta["fused_score"]
+        confidence = fused_meta["fused_confidence"]
+        explanation = format_explanation(signals, overall_score, confidence)
     else:
         time.sleep(2)
         signals = _fixture_signals(modality, content_ref)
+        overall_score, confidence, explanation = build_reasoning(signals)
     # -------------------------------------------------------------------
 
-    overall_score, confidence, explanation = build_reasoning(signals)
     fairness_banner = get_fairness_banner(institution_id, demographic_group)
 
     result = {

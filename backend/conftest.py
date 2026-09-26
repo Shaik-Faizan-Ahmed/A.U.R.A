@@ -1,3 +1,1 @@
-import os
-
-os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(__file__), ".hf_cache"))
+import env_setup  # noqa: F401 -- sets HF_HOME/TORCH_HOME before pytest imports any test module that pulls in torch/transformers (see env_setup.py). Also: its presence on disk puts backend/ on sys.path, so `from main import app` and `from models.text_detector import ...` resolve inside tests/.

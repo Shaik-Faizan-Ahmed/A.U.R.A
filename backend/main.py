@@ -1,3 +1,5 @@
+import env_setup  # noqa: F401 -- must import first, before torch/transformers anywhere in the process, so HF_HOME/TORCH_HOME are set before those libraries read them (see env_setup.py)
+
 from typing import List
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +11,7 @@ from schemas.api_models import (
     FlagItem, DecisionRequest, FairnessResponse,
 )
 import jobs
+import uploads
 from services.bias_audit import get_fairness_stats
 
 app = FastAPI(
@@ -29,6 +32,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(uploads.router)
 
 
 @app.get("/")
