@@ -1,0 +1,54 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.9
+pytest==8.3.3
+httpx==0.27.2
+
+# text_detector.py (Phase 1a)
+# transformers 4.44.2 pins tokenizers<0.20, which has no prebuilt wheel for
+# Python 3.13 on Windows and falls back to a source build requiring Rust +
+# the MSVC linker. transformers==4.48.0 pins tokenizers>=0.21,<0.22, which
+# ships prebuilt abi3 wheels covering Python 3.13, so no compiler is needed.
+transformers==4.48.0
+tokenizers==0.21.4
+torch==2.14.0
+langdetect==1.0.9
+
+# image_detector.py (Phase 1b) -- deps for the 4 analyzers copied from
+# V.E.R.I.T.A.S (ensemble_detector, frequency_analyzer, face_analyzer,
+# metadata_analyzer). transformers/torch above are reused as-is -- these
+# analyzers only need AutoImageProcessor/AutoModelForImageClassification,
+# both already available at the pinned transformers==4.48.0.
+#
+# Versions below are re-pinned from what the build plan originally listed,
+# same class of problem as the transformers/tokenizers fix above -- Python
+# 3.13 on Windows has no prebuilt wheel for the versions VERITAS itself
+# pins, so pip falls back to a source build needing a compiler that isn't
+# installed here:
+#   - numpy 1.26.4 -> 2.1.3   (numpy's first cp313 Windows wheel is 2.0;
+#     2.1.3 is the first patch release with everything backported)
+#   - pillow 10.4.0 -> 11.0.0 (Pillow's first Python-3.13 release)
+#   - opencv-python 4.10.0.84 -> 4.11.0.86 (4.10.0.84's wheels stop at
+#     cp312; 4.11.0.86 ships a cp37-abi3 wheel, i.e. one wheel covers
+#     3.7 through 3.13+)
+#   - scipy 1.14.1 kept as-is -- it already ships a cp313 Windows wheel
+#   - piexif 1.1.3 kept as-is -- pure Python, no compiled wheel involved
+pillow==11.0.0
+numpy==2.1.3
+opencv-python==4.11.0.86
+scipy==1.14.1
+piexif==1.1.3
+
+# mediapipe intentionally NOT pinned/installed: as of this writing mediapipe
+# publishes no Python-3.13 wheel for any platform (Windows or otherwise),
+# and building it from source needs Bazel + a full C++ toolchain, which is
+# far more than this project's dependency footprint should require. This
+# isn't a gap on our side -- face_analyzer.py (copied verbatim from
+# V.E.R.I.T.A.S) already handles mediapipe's absence itself: its import is
+# wrapped in try/except ImportError, and FaceAnalyzer.__init__ falls back
+# to OpenCV's DNN face detector (or Haar cascade if even that's missing)
+# automatically. So face_forensics signals still get produced, just via
+# the lower-accuracy OpenCV path instead of MediaPipe's landmark model --
+# not a difference our test suite (mocked) or jobs.py needs to know about.
+# Revisit if/when mediapipe ships a cp313 wheel.

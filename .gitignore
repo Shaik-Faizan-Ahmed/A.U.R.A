@@ -1,0 +1,45 @@
+# --- Python (backend) ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / cache artifacts
+.pytest_cache/
+.hf_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Downloaded model weights / caches (large binaries, re-downloaded on first
+# run -- ensemble_detector.py's HF cache_dir and face_analyzer.py's
+# MediaPipe/OpenCV DNN model downloads both land here)
+backend/models_cache/
+models_cache/
+
+# --- Node / frontend (Vite/React) ---
+node_modules/
+frontend/dist/
+.vite/
+*.local
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
