@@ -30,7 +30,7 @@ def _valid_schema(signal: dict) -> bool:
 
 def _fake_result(**overrides):
     result = {
-        "layer1_metadata": {"score": 0.2, "metadata": {"duration_seconds": 12.5}},
+        "layer1_metadata": {"score": 0.2, "metadata": {"duration_seconds": 12.5, "video_codec": "h264"}},
         "layer2a_frame_based": {
             "ensemble_scores": [0.3, 0.4, 0.9],
             "avg_ensemble": 0.53,
@@ -105,7 +105,8 @@ def test_extraction_failure_returns_single_neutral_signal(mock_quick):
     assert signals[0]["signal_name"] == "frame_based"
     assert signals[0]["raw_score"] == 0.5
     assert signals[0]["confidence"] == 0.0
-    assert meta == {"fused_score": 0.5, "fused_confidence": 0.0}
+    assert meta["fused_score"] == 0.5
+    assert meta["fused_confidence"] == 0.0
 
 
 @patch("models.video_detector.analyze_video_quick")
@@ -133,6 +134,93 @@ def test_frame_dir_is_created_and_cleaned_up(mock_quick):
 
     assert captured_dir["path"] is not None
     assert not os.path.isdir(captured_dir["path"])  # cleaned up after
+
+
+# --- Missing/unreadable metadata: forced-suspicious override -----------
+
+@patch("models.video_detector.analyze_video_quick")
+def test_unreadable_metadata_is_forced_to_max_suspicion(mock_quick):
+    # No 'video_codec' key -- exactly what metadata_analyzer.py (video)
+    # returns when ffprobe isn't on PATH: cv2-derived keys only, score
+    # stuck at its untouched 0.0 default.
+    mock_quick.return_value = _fake_result(
+        layer1_metadata={"score": 0.0, "metadata": {"duration_seconds": 12.5}},
+        method_breakdown={"metadata": 0.0, "frame_based": 0.62, "temporal": 0.35,
+                          "3d_video": 0.45, "audio": 0.25},
+    )
+
+    signals, meta = analyze_video(FAKE_PATH)
+
+    metadata_signal = next(s for s in signals if s["signal_name"] == "metadata_forensics")
+    assert metadata_signal["raw_score"] == 1.0
+    assert "note" in metadata_signal["evidence_ref"]
+    # With metadata forced to 1.0 at its boosted 0.30 importance, alongside
+    # frame_based 0.62 (0.40), temporal 0.35 (0.25), 3d_video 0.45 (0.10)
+    # and audio 0.25 (0.15) -- five layers present, weights renormalized
+    # over all five -- this fixture computes to 0.598. The bound below is
+    # set just under that (not "> 0.7", which was a miscalculation that
+    # assumed audio was absent from this fixture when it isn't) so this
+    # test still catches the override being weakened or removed later,
+    # without hardcoding an exact float that any unrelated weight tweak
+    # would break.
+    assert meta["fused_score"] > 0.55
+
+
+@patch("models.video_detector.analyze_video_quick")
+def test_hard_metadata_error_also_triggers_override(mock_quick):
+    # metadata_analyzer.py's own hard-failure path (cv2 couldn't open the
+    # file at all) returns {'score': 0.5, 'error': ...} -- no 'metadata'
+    # key whatsoever, not just a missing 'video_codec'.
+    mock_quick.return_value = _fake_result(
+        layer1_metadata={"score": 0.5, "error": "Cannot open video"},
+    )
+
+    signals, meta = analyze_video(FAKE_PATH)
+
+    metadata_signal = next(s for s in signals if s["signal_name"] == "metadata_forensics")
+    assert metadata_signal["raw_score"] == 1.0
+
+
+@patch("models.video_detector.analyze_video_quick")
+def test_readable_metadata_is_not_overridden(mock_quick):
+    # Same low 0.0 metadata score, but this time ffprobe actually ran
+    # ('video_codec' present) -- a genuinely clean video shouldn't get
+    # penalized just for being clean.
+    mock_quick.return_value = _fake_result(
+        layer1_metadata={"score": 0.0, "metadata": {"duration_seconds": 12.5, "video_codec": "h264"}},
+        method_breakdown={"metadata": 0.0, "frame_based": 0.1, "temporal": 0.1,
+                          "3d_video": 0.1, "audio": 0.1},
+    )
+
+    signals, meta = analyze_video(FAKE_PATH)
+
+    metadata_signal = next(s for s in signals if s["signal_name"] == "metadata_forensics")
+    assert metadata_signal["raw_score"] == 0.0
+    assert metadata_signal["evidence_ref"] == {"timestamp": 12.5}
+    assert meta["fused_score"] < 0.2  # every layer genuinely low, nothing forced up
+
+
+@patch("models.video_detector.analyze_video_quick")
+def test_unreadable_metadata_outweighs_readable_at_same_raw_inputs(mock_quick):
+    # Isolates the effect of the override from the effect of the
+    # underlying layers -- same frame_based/temporal/3d_video/audio scores
+    # both times, only metadata's readability differs. If the override is
+    # working, the unreadable case must score strictly higher.
+    shared_layers = {"frame_based": 0.3, "temporal": 0.3, "3d_video": 0.3, "audio": 0.3}
+
+    mock_quick.return_value = _fake_result(
+        layer1_metadata={"score": 0.0, "metadata": {"video_codec": "h264"}},
+        method_breakdown={"metadata": 0.0, **shared_layers},
+    )
+    readable_score = analyze_video(FAKE_PATH)[1]["fused_score"]
+
+    mock_quick.return_value = _fake_result(
+        layer1_metadata={"score": 0.0, "metadata": {}},
+        method_breakdown={"metadata": 0.0, **shared_layers},
+    )
+    unreadable_score = analyze_video(FAKE_PATH)[1]["fused_score"]
+
+    assert unreadable_score > readable_score
 
 
 # --- Fusion math: proves frame_based actually dominates the verdict,   --

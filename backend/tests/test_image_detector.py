@@ -98,7 +98,8 @@ def test_all_analyzers_failing_returns_single_neutral_signal(mock_ensemble, mock
     assert len(signals) == 1
     assert signals[0]["raw_score"] == 0.5
     assert signals[0]["confidence"] == 0.0
-    assert meta == {"fused_score": 0.5, "fused_confidence": 0.0}
+    assert meta["fused_score"] == 0.5
+    assert meta["fused_confidence"] == 0.0
 
 
 @patch("models.image_detector.analyze_metadata")

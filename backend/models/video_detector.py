@@ -78,6 +78,21 @@ _LAYER_IMPORTANCE = {
     "audio": 0.15,
 }
 
+# When metadata_analyzer.py (video) can't read metadata at all -- ffprobe
+# missing from PATH, or the file failed to open -- it silently returns its
+# untouched score of 0.0, since every suspicious-indicator check lives
+# inside an `if ffprobe_data:` block that never runs. That reads as "checked
+# thoroughly, found nothing wrong," when it actually means "couldn't check
+# at all" -- indistinguishable from the cleanest possible video. Since
+# missing metadata (whether from tooling failure or a genuinely stripped
+# file, e.g. many AI-generation/re-encoding pipelines drop it) is itself a
+# real signal, not a null result, this is treated as maximally suspicious
+# (raw_score forced to 1.0) rather than passed through, and given a heavier
+# vote than metadata normally carries -- 0.10 importance times 1.0 would
+# barely move the fused score, which isn't "heavily punished" by any
+# reasonable reading of that phrase.
+_METADATA_UNREADABLE_IMPORTANCE = 0.30
+
 # Fairness-audit quality group -- same mechanism and threshold as
 # image_detector.py's _quality_group(), just reading width/height straight
 # from layer1_metadata (populated by cv2.VideoCapture, always present
@@ -110,7 +125,21 @@ def _quality_group(metadata_result: dict) -> str:
     return "low_bandwidth_video" if min(width, height) < _LOW_RES_THRESHOLD_PX else "standard_video"
 
 
-def _combine_scores_aggressive(breakdown: dict, layer_confidence: dict) -> tuple[float, float]:
+def _metadata_is_readable(metadata_result: dict) -> bool:
+    """True only if ffprobe actually ran and returned stream data.
+    metadata_analyzer.py only ever sets 'video_codec' inside its
+    `if ffprobe_data:` block (see get_ffprobe_metadata's video_streams
+    handling) -- its absence means that block never executed, whether
+    because ffprobe isn't on PATH or the video failed to open entirely
+    (metadata_result itself becomes {'score': 0.5, 'error': ...} in that
+    second case, with no 'metadata' key at all).
+    """
+    if not metadata_result or "error" in metadata_result:
+        return False
+    return "video_codec" in metadata_result.get("metadata", {})
+
+
+def _combine_scores_aggressive(breakdown: dict, layer_confidence: dict, importance: dict = None) -> tuple[float, float]:
     """
     Ported from V.E.R.I.T.A.S's quick_detector.quick_fusion(). The critical
     difference from a plain confidence-weighted average: frame_based
@@ -125,11 +154,12 @@ def _combine_scores_aggressive(breakdown: dict, layer_confidence: dict) -> tuple
     (score, confidence) directly as overall_score/confidence for video.
     """
     scores, weights, confidences = [], [], []
-    for layer, importance in _LAYER_IMPORTANCE.items():
+    importance = importance or _LAYER_IMPORTANCE
+    for layer, base_weight in importance.items():
         if layer not in breakdown:
             continue
         scores.append(breakdown[layer])
-        weights.append(importance)
+        weights.append(base_weight)
         confidences.append(layer_confidence.get(layer, 0.7))
 
     if not scores:
@@ -181,6 +211,12 @@ def analyze_video(content_ref: str):
             return signals, {"fused_score": 0.5, "fused_confidence": 0.0, "quality_group": "standard_video"}
 
         breakdown = result.get("method_breakdown", {})
+        layer1_metadata = result.get("layer1_metadata")
+        metadata_readable = _metadata_is_readable(layer1_metadata)
+        call_importance = _LAYER_IMPORTANCE
+        if "metadata" in breakdown and not metadata_readable:
+            breakdown = {**breakdown, "metadata": 1.0}
+            call_importance = {**_LAYER_IMPORTANCE, "metadata": _METADATA_UNREADABLE_IMPORTANCE}
         num_frames = len(
             (result.get("layer2a_frame_based") or {}).get("ensemble_scores", [])
         )
@@ -198,7 +234,12 @@ def analyze_video(content_ref: str):
             # range that was actually analyzed; metadata/audio (whole-file
             # properties, not localized to specific frames) point at the
             # video's duration instead, when known.
-            if layer_key in ("frame_based", "temporal") and num_frames:
+            if layer_key == "metadata" and not metadata_readable:
+                evidence_ref = {
+                    "note": "No video metadata could be read (ffprobe missing or file unreadable) -- "
+                            "treated as suspicious rather than clean",
+                }
+            elif layer_key in ("frame_based", "temporal") and num_frames:
                 evidence_ref = {"frame_range": [0, num_frames]}
             elif layer_key in ("metadata", "audio") and duration:
                 evidence_ref = {"timestamp": round(float(duration), 2)}
@@ -229,7 +270,7 @@ def analyze_video(content_ref: str):
             })
             return signals, {"fused_score": 0.5, "fused_confidence": 0.0, "quality_group": _quality_group(result.get("layer1_metadata"))}
 
-        fused_score, fused_confidence = _combine_scores_aggressive(breakdown, per_layer_confidence)
+        fused_score, fused_confidence = _combine_scores_aggressive(breakdown, per_layer_confidence, call_importance)
         return signals, {
             "fused_score": round(fused_score, 3),
             "fused_confidence": round(fused_confidence, 3),

@@ -8,7 +8,7 @@ from models.progress_tracker import get_progress_tracker
 from models.text_detector import analyze_text
 from models.image_detector import analyze_image
 from models.video_detector import analyze_video
-from services.reasoning import build_reasoning
+from services.reasoning import build_reasoning, format_explanation
 from services.bias_audit import get_fairness_banner, record_outcome
 import config
 import db
@@ -100,7 +100,27 @@ def _run_analysis(job_id, institution_id, student_ref, modality, content_ref, de
     if not demographic_group:
         demographic_group = _suggested_group(modality, meta) or "unspecified"
 
-    overall_score, confidence, explanation = build_reasoning(signals)
+    # image/video carry their own importance-weighted fused (score, confidence)
+    # in meta -- see image_detector.py/video_detector.py's module docstrings
+    # and compute_overall()'s docstring in reasoning.py for why a plain
+    # confidence-weighted average (build_reasoning) is the wrong fusion for
+    # those two. This branch was dropped in the SQLite-persistence rewrite of
+    # this function (build_reasoning(signals) was being called unconditionally
+    # for every modality) -- silently reintroducing the exact dilution bug
+    # that branch was written to fix: a decisive frame_based/temporal signal
+    # getting averaged down toward 0.5 by a barely-informative layer with
+    # similar confidence, instead of frame_based's intended 40% dominance
+    # actually applying. meta.get(...) with a None-check, not meta[...],
+    # since the except-block above sets meta = {} on a hard analysis failure
+    # and that path must still fall through to build_reasoning's signals-only
+    # fallback rather than KeyError.
+    fused_score = meta.get("fused_score") if modality in ("image", "video") else None
+    if fused_score is not None:
+        fused_confidence = meta.get("fused_confidence", 0.0)
+        overall_score, confidence = round(fused_score, 3), round(fused_confidence, 3)
+        explanation = format_explanation(signals, overall_score, confidence)
+    else:
+        overall_score, confidence, explanation = build_reasoning(signals)
 
     # --- Per-modality flag decision --------------------------------------
     # Image/video: no labeled validation set exists yet for either modality
